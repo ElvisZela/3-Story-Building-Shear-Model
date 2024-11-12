@@ -1,0 +1,238 @@
+% MATLAB code for 2D shear building model with geometric and material properties-based mass and stiffness
+% matrices, multiple absorbers, unit force on bottom floor, frequency response plot, natural frequencies,
+% mode shapes, and 2D plot of building mode shapes.
+
+clear; close all; clc;
+
+null_state = 1;             % Set to 1 to simulate ignoring set absorbers (does not remove random)
+abs_toggle = 1;             % Toggle for displacements as magnitudes (1) or signed (not 1)
+show_absorb_disp = 0;       % Toggle to show dispalcement of absorbers in plots (1)
+                            % or to only show floor displacements (not 1)
+%% Define Building Parameters and Material Properties
+numFloors = 3;                   % Number of floors
+L = 0.2;                         % Length of each floor (m)
+d = 0.001;                       % Thickness of each floor (m)
+b = 0.08;                        % Width of each floor (m)
+E = 210E9;                       % Young's modulus (Pa)
+
+% Calculate the second moment of area
+I = b*d*d*d/ 12;                 % m^4
+
+% Calculate the mass of each floor
+floorMass = 1.83;
+M = diag(repmat(floorMass, 1, numFloors));
+
+% Calculate stiffness for each floor
+floorStiffness =(24*E*I)/(L*L*L);               % Using same formula as 2CW code for same k
+K = floorStiffness*[2 -1 0;-1 2 -1;0 -1 1];     % NumFloors is always 3 so no need to generalise
+
+%% Dampening Matrix (using Rayleigh damping)
+
+% DampingRatio for the floors, keep this at 0
+% We will only alter the damping for the absorbers not the floor
+dampingRatio = 0.0;         % Target damping ratio for Rayleigh damping
+
+% Define Rayleigh damping coefficients
+naturalFrequencies = sqrt(eig(K, M)); % Calculate natural frequencies
+targetDampingRatios = dampingRatio * ones(numFloors, 1); % Same for all floors
+
+% Solve for alpha and beta (mass and stiffness proportional damping)
+A = [naturalFrequencies.^2 naturalFrequencies];
+b = targetDampingRatios .* naturalFrequencies; 
+coefficients = A \ b; 
+alpha = coefficients(1); % Mass proportional coefficient
+beta = coefficients(2);   % Stiffness proportional coefficient
+
+% Construct the damping matrix
+C = alpha * M + beta * K; % Damping matrix using Rayleigh damping
+
+%% Random N absorbers
+% Number of absorbers and their properties
+N = 5;                        % Number of absorbers to add
+absorberMass = 0.05;          % Mass of each absorber (kg)
+%absorberStiffness = 250;     % Constant Stiffness for absorbers (N/m)
+absorberStiffnessM = randi([5, 300], N, 1); % Random stiffness assignment
+
+% Units!!! This is dashpot viscousity not dampening ratio
+%absorberDamping = 0.0;       % Damping coefficients for absorbers (N.s/m)
+absorberDampingM = randi([1, 100], N, 1) * 0.01
+
+% Randomly assign absorbers to floors
+assignedFloors = randi([1, numFloors], N, 1); % Random floor assignment
+
+for i = 1:N
+    floorIndex = assignedFloors(i);
+    absorberStiffness = absorberStiffnessM(i);
+    absorberDamping = absorberDampingM(i);
+
+    % Expand matrices to accommodate the absorber
+    M = blkdiag(M, absorberMass);
+    K = blkdiag(K, absorberStiffness);
+    C = blkdiag(C, absorberDamping);
+
+    % Modify stiffness and damping matrices to couple absorber to specified floor
+    absorberIndex = numFloors + i;
+    K(floorIndex, floorIndex) = K(floorIndex, floorIndex) + absorberStiffness;
+    K(absorberIndex, absorberIndex) = absorberStiffness;
+    K(floorIndex, absorberIndex) = -absorberStiffness;
+    K(absorberIndex, floorIndex) = -absorberStiffness;
+
+    C(floorIndex, floorIndex) = C(floorIndex, floorIndex) + absorberDamping;
+    C(absorberIndex, absorberIndex) = absorberDamping;
+    C(floorIndex, absorberIndex) = -absorberDamping;
+    C(absorberIndex, floorIndex) = -absorberDamping;
+end
+
+%% Define Absorber Parameters
+if null_state == 1
+    absorbers = struct(...
+    'mass', [], ...                % Masses of absorbers (kg)
+    'stiffness', [], ...         % Stiffnesses of absorbers (N/m)
+    'damping', [], ...               % Damping coefficients (N.s/m)
+    'floor', [] ...                    % Floors to attach each absorber
+);
+else 
+    % Current values are 3 absorbers optimised for all mode shapes
+    absorbers = struct(...
+        'mass', [0.05 0.05 0.05], ...                % Masses of absorbers (kg)
+        'stiffness', [22.18 178.67 377.77], ...         % Stiffnesses of absorbers (N/m)
+        'damping', [0.21 0.598 0.869], ...               % Damping coefficients (N.s/m)
+        'floor', [3 1 2] ...                    % Floors to attach each absorber
+    );
+end
+
+
+% Extend system matrices to include each absorber
+for i = 1:length(absorbers.mass)
+    absorberMass = absorbers.mass(i);
+    absorberStiffness = absorbers.stiffness(i);
+    absorberDamping = absorbers.damping(i);
+    floorIndex = absorbers.floor(i);
+
+    % Expand matrices to accommodate the absorber
+    M = blkdiag(M, absorberMass);
+    K = blkdiag(K, absorberStiffness);
+    C = blkdiag(C, absorberDamping);
+
+    % Modify stiffness and damping matrices to couple absorber to specified floor
+    absorberIndex = numFloors + i;
+    K(floorIndex, floorIndex) = K(floorIndex, floorIndex) + absorberStiffness;
+    K(absorberIndex, absorberIndex) = absorberStiffness;
+    K(floorIndex, absorberIndex) = -absorberStiffness;
+    K(absorberIndex, floorIndex) = -absorberStiffness;
+
+    C(floorIndex, floorIndex) = C(floorIndex, floorIndex) + absorberDamping;
+    C(absorberIndex, absorberIndex) = absorberDamping;
+    C(floorIndex, absorberIndex) = -absorberDamping;
+    C(absorberIndex, floorIndex) = -absorberDamping;
+end
+%% Frequency Response Analysis
+syms w;
+% Initialize response matrix
+numDOF = numFloors + length(absorbers.mass) + N;
+
+% Apply unit force to the bottom floor (floor 1)
+forceVector = zeros(numDOF, 1);
+forceVector(1) = 1;
+
+B = -w^2 * M + 1i * w * C + K;     % Dynamic stiffness matrix
+displacement = B \ forceVector;   % Solve for displacements
+% Toggle for signed or abs displacements
+if abs_toggle == 1
+    displacement = abs(real(displacement));
+else
+    displacement = real(displacement);
+end
+
+%% Plot Frequency Response of Each Floor
+figure;
+hold on;
+
+ifloor=1;
+ezplot(displacement(ifloor), [0, 130]);
+set(findobj('Type','line'),'Color','k')
+ifloor=2;
+ezplot(displacement(ifloor), [0, 130]);
+set(findobj('Type','line','Color','b'),'Color','g')
+ifloor=3;
+ezplot(displacement(ifloor), [0, 130]);
+set(findobj('Type','line','Color','b'),'Color','r')
+ 
+set(findobj('Type','line','Color','k'),'Color','b')
+  
+set(findobj('Type','line'),'LineStyle','-')
+
+xlabel('w (rad/s)');
+ylabel('Displacement Magnitude');
+title('Frequency Response of Each Floor');
+legend('Floor 1', 'Floor 2', 'Floor 3');
+legend show;
+grid on;
+hold off
+
+% Calculate frequency response functions
+all_displacement = [];
+for w = 1:130
+  B = -w^2 * M + 1i * w * C + K;     % Dynamic stiffness matrix
+  displacement = B \ forceVector;   % Solve for displacements including absorbers
+  if show_absorb_disp ~= 1
+    displacement = displacement(1:3, 1);    % Show displacements of floors only
+  end
+
+  if abs_toggle == 1
+    displacement = abs(real(displacement));
+  else
+    displacement = real(displacement);
+  end
+    all_displacement = [all_displacement displacement];
+end
+w = 1:130;
+
+fig2 = figure(2);
+ax2 = axes('Parent', fig2);
+h = plot(ax2, (w./(2*pi)),(all_displacement),'-');
+
+
+xlabel('frequency (Hz)');
+ylabel('Displacement Magnitude');
+title('Frequency Response of Each Floor');
+legend('Floor 1', 'Floor 2', 'Floor 3');
+legend show;
+grid on;
+hold off;
+
+%% Compute Natural Frequencies and Mode Shapes
+[V, D] = eig(K, M);  % Solve the eigenvalue problem
+
+% Extract natural frequencies (in Hz)
+naturalFrequencies = sqrt(diag(D)) / (2 * pi);
+[naturalFrequencies, sortIdx] = sort(naturalFrequencies);  % Sort frequencies
+V = V(:, sortIdx);                       % Sort mode shapes
+
+% Display natural frequencies
+disp('Natural Frequencies (Hz):');
+disp(naturalFrequencies);
+
+%% 2D Visualization of Each Mode Shape
+
+if numDOF == 3;
+
+    V = [0 0 0; V];  % Add a row of zeroes at the top
+  
+    V_ = V + 0.25;
+    V = V - 0.25;
+    
+    for imode=1:3
+        figure
+        axis([-5 5 0 3.5])
+        title1 = ['Mode ' int2str(imode) ' (' num2str(naturalFrequencies(imode)) 'Hz)'];
+        title(title1)
+        hold on
+        plot((V(:,imode)),([0 1 2 3]))
+        plot([0 0 0 0],[0 1 2 3],'k')
+        plot((V_(:,imode)),([0 1 2 3]))
+        for jmode=1:3
+            plot([V(jmode+1,imode) V_(jmode+1,imode)],[jmode jmode])
+        end
+    end
+end
